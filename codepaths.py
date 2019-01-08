@@ -40,6 +40,22 @@ class CodeTree:
             ret += self._print_leaves(i)
         return ret
 
+    def _find_all_paths(self, node, path):
+        path = path + [node.name]
+        if len(node.children) == 0:
+            return [path]
+        paths = []
+        for n in node.children:
+            newpaths = self._find_all_paths(n, path)
+            for newpath in newpaths:
+                paths.append(newpath)
+        return paths
+
+    def paths(self):
+        if self.root is None:
+            return []
+        return self._find_all_paths(self.root, [])
+
     def leaves(self):
         if self.root is None:
             return ""
@@ -132,7 +148,11 @@ get_paths(tree, node, args.cscopedb, directories, exclude, args.duplicates)
 sys.stderr.write("\nProccessed {} functions in {} seconds\n".format(tree.processed, tree.total))
 sys.stderr.flush()
 
+leaves = tree.paths()
+lsorted = sorted(leaves, key=lambda x:len(x))
+
 if args.tree:
     print(tree)
 else:
-    print(tree.leaves().strip())
+    for i in lsorted:
+        print(i[-1])
