@@ -48,6 +48,8 @@ parser.add_argument("-t", "--trigger",
     help="The function that must be called to trigger the error injection")
 parser.add_argument("-d", "--delay", type=int,
     help="The delay to wait before injecting the error")
+parser.add_argument("-T", "--timeout", type=int,
+    help="Timeout after error injection has been loaded to wait on the task")
 parser.add_argument("COMMAND", nargs='+', help="The command to run")
 
 args = parser.parse_args()
@@ -80,8 +82,24 @@ b.attach_kretprobe(event=args.trigger, fn_name="trigger_function_ret")
 b.attach_kprobe(event=args.trigger, fn_name="trigger_function")
 b.attach_kprobe(event=args.override, fn_name="override_function")
 
+print("Dropping caches")
+f = open("/proc/sys/vm/drop_caches", "w")
+f.write("3")
+f.close()
+
 print("Waiting for the command to exit")
-p.wait()
+while p.poll() is None:
+    if args.timeout:
+        sleep(args.timeout)
+        if p.poll() is None:
+            print("Killing the task, it didn't die")
+            f = open("nofail.txt", "a")
+            f.write(args.trigger + "\n")
+            f.close()
+            p.kill()
+            p.wait()
+        break
+    p.wait()
 
 # We have to remove in this order otherwise we could end up with a half
 # populated hasmap and overrding legitimate things.
