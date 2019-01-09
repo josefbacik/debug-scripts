@@ -77,6 +77,16 @@ int recurse(int a)
     return a;
 }
 
+int multiline_if(void)
+{
+    return 2;
+}
+
+int multiline_if_2(void)
+{
+    return 3;
+}
+
 int main(int argc, char **argv)
 {
     /*
@@ -85,6 +95,10 @@ int main(int argc, char **argv)
      */
     if (foo(bar()) > baz(boo(bean(), box())))
         return 1;
+    if (multiline_if() >
+        multiline_if_2())
+        return 0;
     funky("blahblah(boo)");
+    boo(1, 2);
     return 0;
 }

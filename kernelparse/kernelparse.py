@@ -7,15 +7,19 @@ class Function:
         self.defined = defined
         self.calls = {}
         self.callers = {}
+        self.args = []
         self.recurses = False
 
-    def add_call(self, call):
+    def add_call(self, call, args):
         if call.name in self.calls:
             self.calls[call.name]['count'] += 1
+            if args not in self.calls[call.name]['args']:
+                self.calls[call.name]['args'].extend([args])
             return
         self.calls[call.name] = {}
         self.calls[call.name]['func'] = call
         self.calls[call.name]['count'] = 1
+        self.calls[call.name]['args'] = [args]
 
     def add_caller(self, caller):
         if caller.name == self.name:
@@ -23,6 +27,10 @@ class Function:
         if caller.name in self.callers:
             return
         self.callers[caller.name] = caller
+
+    def add_args(self, args):
+        if args not in self.args:
+            self.args.extend([args])
 
     def contains_calls(self, funcs):
         if len(self.calls) == 0:
@@ -64,7 +72,7 @@ class FunctionTree:
         f = Function(name, True)
         self.functions[name] = f
 
-    def add_func_call(self, func, call):
+    def add_func_call(self, func, call, args):
         c = None
 #        print("adding call '{}'".format(call))
         # From
@@ -76,7 +84,7 @@ class FunctionTree:
             self.functions[call] = c
         else:
             c = self.functions[call]
-        func.add_call(c)
+        func.add_call(c, args)
         c.add_caller(func)
 
 class FileParser:
@@ -100,10 +108,26 @@ class FileParser:
         self._directive_re = re.compile("^\s*\#.*")
         self._comment_block_start_re = re.compile("^\s*\/\*")
         self._comment_block_end_re = re.compile(".*\*/")
-        self._call_re = re.compile("[-(=+/*!|&<>%~^\s]*(\w+)\s*\(", re.DOTALL)
+        self._call_re = re.compile("[-()=+/*!|&<>%~^\s,]*(\w+)\s*(\(.*\))",
+                                   re.DOTALL|re.MULTILINE)
         self._statement_re = re.compile(".*[;{}]+\s*(?:/\*)*.*(?:\*/)*$",
                                         re.DOTALL|re.MULTILINE)
         self.debug = debug
+
+    def _grab_args(self, line):
+        end_pos = 0
+        cur_paren_count = 1
+        for i in range(1, len(line)):
+            if line[i] == '(':
+                cur_paren_count += 1
+            elif line[i] == ')':
+                cur_paren_count -= 1
+            if cur_paren_count == 0:
+                end_pos = i
+                break
+        if end_pos == 0:
+            return ""
+        return line[1:end_pos]
 
     def _skip_line(self, line):
         cur = self.state[-1]
@@ -146,13 +170,21 @@ class FileParser:
         # the function format
         buf = re.sub("[\"\'].*[\"\']", "STRING", buf)
 
-        m = self._call_re.findall(buf)
-        if len(m) == 0:
+        m = self._call_re.match(buf)
+        if m is None:
             return
-        for f in m:
-            if f in self._keywords:
-                continue
-            ft.add_func_call(self.cur_function, f)
+        remaining = m.group(2)
+        if m.group(1) not in self._keywords:
+            # grab the args to save into this call
+            args = self._grab_args(m.group(2))
+            ft.add_func_call(self.cur_function, m.group(1), args);
+            self._handle_function_call(ft, args)
+            remaining = m.group(2).replace(args, "", 1)
+        else:
+            # strip the first and last ()
+            remaining = m.group(2).replace("(", "", 1)
+            remaining = "".join(remaining.rsplit(")", 1))
+        self._handle_function_call(ft, remaining)
 
     def _handle_function_def(self, ft, buf):
         if self.state[-1] != self._GLOBAL:
@@ -208,7 +240,6 @@ class FileParser:
                 continue
 
             buf = self._strip_comments(buf)
-#            print("buf is '{}'".format(buf))
             if self._handle_function_def(ft, buf):
                 buf = ""
                 continue
