@@ -2,13 +2,18 @@ import os
 import re
 
 class Function:
-    def __init__(self, name, defined=False):
+    def __init__(self, name, definition, defined=False):
         self.name = name
         self.defined = defined
         self.calls = {}
         self.callers = {}
         self.args = []
         self.recurses = False
+        self.definition = definition
+        self.content = ""
+
+    def add_content(self, buf):
+        self.content += buf
 
     def add_call(self, call, args):
         if call.name in self.calls:
@@ -64,12 +69,13 @@ class FunctionTree:
         self.debug = debug
         self.functions = {}
 
-    def add_function(self, name):
+    def add_function(self, name, definition):
         if name in self.functions:
             self.functions[name].defined = True
+            self.functions[name].definition = definition
             return
 #        print("adding function '{}'".format(name))
-        f = Function(name, True)
+        f = Function(name, definition, True)
         self.functions[name] = f
 
     def add_func_call(self, func, call, args):
@@ -80,7 +86,7 @@ class FunctionTree:
             self.recurses = True
             return
         if call not in self.functions:
-            c = Function(call)
+            c = Function(call, "")
             self.functions[call] = c
         else:
             c = self.functions[call]
@@ -161,6 +167,14 @@ class FileParser:
             self.state.append(self._IN_BLOCK)
         if '}' in line:
             self.state.pop()
+        if self.cur_function is None:
+            return
+        if self._IN_FUNCTION not in self.state:
+            content = self.cur_function.content
+            content = "".join(content.rsplit('}', 1))
+            content = re.sub("^\s*$", '', content, flags=re.MULTILINE)
+            content = re.sub('\t', '    ', content)
+            self.cur_function.content = content
 
     def _handle_function_call(self, ft, buf):
         if self._IN_FUNCTION not in self.state:
@@ -195,7 +209,10 @@ class FileParser:
             if self.debug:
                 print("Couldn't match '{}'".format(buf))
             return False
-        ft.add_function(m.group(1))
+        definition = "".join(buf.replace('\n', ' ').rsplit('{', 1)).strip()
+        definition = re.sub('\s+', ' ', definition)
+        definition = re.sub('\( ', '(', definition)
+        ft.add_function(m.group(1), definition)
         self.state.append(self._IN_FUNCTION)
         self.cur_function = ft.functions[m.group(1)]
         return True
@@ -243,6 +260,8 @@ class FileParser:
             if self._handle_function_def(ft, buf):
                 buf = ""
                 continue
+            if self.cur_function != None:
+                self.cur_function.add_content(buf)
             self._handle_function_call(ft, buf)
             self._handle_block(buf)
             buf = ""
