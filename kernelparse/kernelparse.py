@@ -118,6 +118,7 @@ class FileParser:
                                    re.DOTALL|re.MULTILINE)
         self._statement_re = re.compile(".*[;{}]+\s*(?:/\*)*.*(?:\*/)*$",
                                         re.DOTALL|re.MULTILINE)
+        self._special_eol_re = re.compile("\)$", re.MULTILINE)
         self.debug = debug
 
     def _grab_args(self, line):
@@ -159,6 +160,28 @@ class FileParser:
             return True
         return False
 
+    def _collapse_nonblock_statement(self, content):
+        ret = ""
+        cur = ""
+        for s in content.split('\n'):
+            tmp = cur + s;
+            open_count = tmp.count('(')
+            close_count = tmp.count(')')
+            if open_count == close_count:
+                if cur == "":
+                    cur = s
+                else:
+                    cur += " " + s.strip()
+                ret += cur + '\n'
+                cur = ""
+                continue
+            if cur == "":
+                cur = s
+            else:
+                cur += " " + s.strip()
+        ret += cur + '\n'
+        return ret
+
     def _handle_block(self, line):
         if '}' not in line and '{' not in line:
             return
@@ -171,10 +194,35 @@ class FileParser:
             return
         if self._IN_FUNCTION not in self.state:
             content = self.cur_function.content
+
+            # strip the tailing } if there is one
             content = "".join(content.rsplit('}', 1))
+
+            # strip any empty space lines
             content = re.sub("^\s*$", '', content, flags=re.MULTILINE)
+
+            # just make it easier for testing
             content = re.sub('\t', '    ', content)
-            self.cur_function.content = content
+
+            # This strips any newlines that exist for blocks, consider
+            #   if (foo >
+            #       bar)
+            # we want this to be
+            #   if (foo > bar)
+            # just for ease of processing later
+            content = re.sub('(?<![;{})])\n\s*', ' ', content)
+
+            # And this is for the case of
+            #   if (foo()
+            #       > bar())
+            # To do the processing to make this be
+            #   if (foo() > bar())
+            # again for ease of processing later
+            if self._special_eol_re.search(content) is not None:
+                content = self._collapse_nonblock_statement(content)
+
+            # Strip the excess whitespace, this makes testcases easier to write.
+            self.cur_function.content = content.strip()
 
     def _handle_function_call(self, ft, buf):
         if self._IN_FUNCTION not in self.state:
@@ -238,7 +286,8 @@ class FileParser:
                 continue
             if not incomment:
                 final.append(b)
-        return "\n".join(final)
+        final = [l for l in final if re.search("^\s*$", l) is None]
+        return "\n".join(final) + "\n"
 
     def parse_file(self, f, ft):
         infunction = 0

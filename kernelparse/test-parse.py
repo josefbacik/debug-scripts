@@ -35,16 +35,15 @@ for name in funcs.keys():
 print("PASSED: basic checks")
 
 func = ft.functions['main']
-content = """
-    if (foo(bar()) > baz(boo(bean(), box())))
+content = """if (foo(bar()) > baz(boo(bean(), box())))
         return 1;
-    if (multiline_if() >
-        multiline_if_2())
+    if (multiline_if() > multiline_if_2())
+        return 0;
+    if (multiline_if() > multiline_if_2())
         return 0;
     funky("blahblah(boo)");
     boo(1, 2);
-    return 0;
-"""
+    return 0;"""
 
 if func.content != content:
     print("FAILED: the content didn't match!")

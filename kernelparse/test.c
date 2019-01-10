@@ -98,6 +98,13 @@ int main(int argc, char **argv)
     if (multiline_if() >
         multiline_if_2())
         return 0;
+
+    /* This is for the content stuff to make sure it all ends up on the same
+     * line.
+     */
+    if (multiline_if()
+        > multiline_if_2())
+        return 0;
     funky("blahblah(boo)");
     boo(1, 2);
     return 0;
