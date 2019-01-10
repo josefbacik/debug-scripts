@@ -18,7 +18,8 @@ funcs = {
           'recurse' : 'int recurse(int a)',
           'multiline_if' : 'int multiline_if(void)',
           'multiline_if_2' : 'int multiline_if_2(void)',
-          'main' : 'int main(int argc, char **argv)'}
+          'main' : 'int main(int argc, char **argv)',
+          'pointer' : 'int pointer(void *blah)' }
 
 for name in funcs.keys():
     if name not in ft.functions:
@@ -35,7 +36,8 @@ for name in funcs.keys():
 print("PASSED: basic checks")
 
 func = ft.functions['main']
-content = """if (foo(bar()) > baz(boo(bean(), box())))
+content = """int i = 0;
+    if (foo(bar()) > baz(boo(bean(), box())))
         return 1;
     if (multiline_if() > multiline_if_2())
         return 0;
@@ -43,6 +45,10 @@ content = """if (foo(bar()) > baz(boo(bean(), box())))
         return 0;
     funky("blahblah(boo)");
     boo(1, 2);
+    pointer(&some->weirdness);
+    do {
+        boo(1, 2);
+    } while (i++ < 10);
     return 0;"""
 
 if func.content != content:
@@ -51,7 +57,7 @@ if func.content != content:
     exit(1)
 
 calls = ['foo', 'bar', 'baz', 'boo', 'bean', 'box', 'multiline_if',
-         'multiline_if_2', 'funky']
+         'multiline_if_2', 'funky', 'pointer']
 if set(calls) != set(func.calls.keys()):
     print("FAILED: didn't find all the calls {}".format(func.calls.keys()))
     exit(1)
@@ -68,7 +74,8 @@ valid_args = { 'foo'            : ['bar()'],
                'box'            : [''],
                'funky'          : ['STRING'],
                'multiline_if'   : [''],
-               'multiline_if_2' : [''] }
+               'multiline_if_2' : [''],
+               'pointer'        : ['&some->weirdness'] }
 
 for c in func.calls.keys():
     call = func.calls[c]

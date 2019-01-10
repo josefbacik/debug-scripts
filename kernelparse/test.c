@@ -87,11 +87,18 @@ int multiline_if_2(void)
     return 3;
 }
 
+int pointer(void *blah)
+{
+    return 2;
+}
+
 int main(int argc, char **argv)
 {
+    int i = 0;
     /*
      * a multiline comment to make(sure)
      * we don't accidentally grab(these as fucntions)
+     * or ignore stuff;
      */
     if (foo(bar()) > baz(boo(bean(), box())))
         return 1;
@@ -107,5 +114,11 @@ int main(int argc, char **argv)
         return 0;
     funky("blahblah(boo)");
     boo(1, 2);
+    pointer(&some->weirdness);
+
+    do {
+        boo(1, 2);
+    } while (i++ < 10);
+
     return 0;
 }

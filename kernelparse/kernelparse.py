@@ -197,30 +197,6 @@ class FileParser:
 
             # strip the tailing } if there is one
             content = "".join(content.rsplit('}', 1))
-
-            # strip any empty space lines
-            content = re.sub("^\s*$", '', content, flags=re.MULTILINE)
-
-            # just make it easier for testing
-            content = re.sub('\t', '    ', content)
-
-            # This strips any newlines that exist for blocks, consider
-            #   if (foo >
-            #       bar)
-            # we want this to be
-            #   if (foo > bar)
-            # just for ease of processing later
-            content = re.sub('(?<![;{})])\n\s*', ' ', content)
-
-            # And this is for the case of
-            #   if (foo()
-            #       > bar())
-            # To do the processing to make this be
-            #   if (foo() > bar())
-            # again for ease of processing later
-            if self._special_eol_re.search(content) is not None:
-                content = self._collapse_nonblock_statement(content)
-
             # Strip the excess whitespace, this makes testcases easier to write.
             self.cur_function.content = content.strip()
 
@@ -294,18 +270,50 @@ class FileParser:
         self.state = [self._GLOBAL]
         self.cur_function = None
         buf = ""
-        for line in f:
-#            print(self.state)
+
+        # Strip the file down to a reasonable set of statements
+        content = f.read()
+
+        # First strip all the comments
+        content = self._strip_comments(content)
+
+        # Strip any empty lines
+        content = re.sub("^\s*$", '', content, flags=re.MULTILINE)
+
+        # Just for consistency with testing replace tabs with spaces
+        content = re.sub('\t', '    ', content)
+
+        # Make sure open braces are on their own line, otherwise it confuses the
+        # statement stuff.
+        content = re.sub('\{(?!\n)', '{\n', content)
+
+        # We want to make sure that logical statements are all on one line, so
+        # things like
+        #   if (a >
+        #       b)
+        #
+        # gets turned into
+        #   if (a > b)
+        content = re.sub('(?<![;{})])\n\s*', ' ', content)
+
+        # The above doesn't handle the case of
+        #   if (foo()
+        #       > bar())
+        # So we handle that special case here.
+        if self._special_eol_re.search(content) is not None:
+            content = self._collapse_nonblock_statement(content)
+        content.strip()
+
+        for line in content.split('\n'):
             if self._skip_line(line):
                 buf = ""
                 continue
 
-            buf += line
+            buf += line + "\n"
 
             if self._statement_re.match(buf) is None:
                 continue
 
-            buf = self._strip_comments(buf)
             if self._handle_function_def(ft, buf):
                 buf = ""
                 continue
@@ -322,7 +330,7 @@ class FileParser:
         elif os.path.isfile(path):
             if path.endswith('.c') or path.endswith('.h'):
                 infile = open(path)
-                self._parse_file(infile, ft)
+                self.parse_file(infile, ft)
                 infile.close()
 
 if __name__ == "__main__":
