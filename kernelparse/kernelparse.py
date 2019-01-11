@@ -116,9 +116,12 @@ class FileParser:
         self._comment_block_end_re = re.compile(".*\*/")
         self._call_re = re.compile("[-()=+/*!|&<>%~^\s,]*(\w+)\s*(\(.*\))",
                                    re.DOTALL|re.MULTILINE)
-        self._statement_re = re.compile(".*[;{}]+\s*(?:/\*)*.*(?:\*/)*$",
+        #self._statement_re = re.compile(".*[;{}]+\s*(?:/\*)*.*(?:\*/)*$",
+        #                                re.DOTALL|re.MULTILINE)
+        self._statement_re = re.compile(".*[;{}]$",
                                         re.DOTALL|re.MULTILINE)
         self._special_eol_re = re.compile("\)$", re.MULTILINE)
+        self._single_line_cond_re = re.compile("^.+\(.*\).+;$")
         self.debug = debug
 
     def _grab_args(self, line):
@@ -198,15 +201,11 @@ class FileParser:
             # strip the tailing } if there is one
             content = "".join(content.rsplit('}', 1))
             # Strip the excess whitespace, this makes testcases easier to write.
-            self.cur_function.content = content.strip()
+            self.cur_function.content = content.rstrip()
 
     def _handle_function_call(self, ft, buf):
         if self._IN_FUNCTION not in self.state:
             return
-
-        # Kill any string literals since they can mess with us if they are in
-        # the function format
-        buf = re.sub("[\"\'].*[\"\']", "STRING", buf)
 
         m = self._call_re.match(buf)
         if m is None:
@@ -265,6 +264,18 @@ class FileParser:
         final = [l for l in final if re.search("^\s*$", l) is None]
         return "\n".join(final) + "\n"
 
+    def _make_pretty(self, buf):
+        ret = ""
+        indent = 0
+        for l in buf.split('\n'):
+            l = l.strip()
+            if '}' in l:
+                indent -= 1
+            ret += '\n' + '  ' * indent + l
+            if '{' in l:
+                indent += 1
+        return ret
+
     def parse_file(self, f, ft):
         infunction = 0
         self.state = [self._GLOBAL]
@@ -276,6 +287,10 @@ class FileParser:
 
         # First strip all the comments
         content = self._strip_comments(content)
+
+        # Cull any string literals, they could have problematic things and we
+        # just don't care
+        content = re.sub("[\"\'].*[\"\']", "STRING", content)
 
         # Strip any empty lines
         content = re.sub("^\s*$", '', content, flags=re.MULTILINE)
@@ -302,7 +317,25 @@ class FileParser:
         # So we handle that special case here.
         if self._special_eol_re.search(content) is not None:
             content = self._collapse_nonblock_statement(content)
+
+        # Turn any 2 line conditional into a block as well, which is
+        #   if (foo)
+        #     bar();
+        # becomes
+        #   if (foo)
+        #   {
+        #      bar();
+        #   }
+        content = re.sub("^(.+\)(?!;))\s(.+;)$", r'\1\n{\n\2\n}', content,
+                         flags=re.MULTILINE)
+
+        # And now the same thing above, except for else, cause it's special
+        content = re.sub("^(.*else)\s(.+;)$", r'\1\n{\n\2\n}', content,
+                         flags=re.MULTILINE)
+
         content.strip()
+
+        content = self._make_pretty(content)
 
         for line in content.split('\n'):
             if self._skip_line(line):

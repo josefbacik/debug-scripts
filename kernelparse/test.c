@@ -92,6 +92,11 @@ int pointer(void *blah)
     return 2;
 }
 
+int ifcall(void)
+{
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     int i = 0;
@@ -106,6 +111,9 @@ int main(int argc, char **argv)
         multiline_if_2())
         return 0;
 
+    if (i == 1)
+        ifcall();
+
     /* This is for the content stuff to make sure it all ends up on the same
      * line.
      */
@@ -116,9 +124,15 @@ int main(int argc, char **argv)
     boo(1, 2);
     pointer(&some->weirdness);
 
+    if (i == 1) ifcall();
+
     do {
         boo(1, 2);
     } while (i++ < 10);
 
+    if (i == 1)
+        boo(2, 1);
+    else
+        boo(1, 2);
     return 0;
 }
