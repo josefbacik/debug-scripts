@@ -61,6 +61,7 @@ content = """  int i = 0;
   {
     ifcall();
   }
+  i = (1 + 1) \ 2;
   do {
     boo(1, 2);
   } while (i++ < 10);

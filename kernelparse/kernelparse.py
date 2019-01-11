@@ -98,7 +98,7 @@ class FileParser:
     _IN_BLOCK = 1
     _IN_FUNCTION = 2
 #    _IN_COMMENT = 2
-    _IN_DIRECTIVE = 3
+#    _IN_DIRECTIVE = 3
     _IN_PAREN = 4
     _keywords = ['auto', 'break', 'case', 'char', 'const', 'continue',
                  'default', 'do', 'double', 'else', 'enum', 'extern',
@@ -138,16 +138,6 @@ class FileParser:
         if end_pos == 0:
             return ""
         return line[1:end_pos]
-
-    def _skip_line(self, line):
-        cur = self.state[-1]
-        if self._directive_re.match(line):
-            if '\\' in line:
-                self.state.append(self._IN_DIRECTIVE)
-            return True
-        if cur == self._IN_DIRECTIVE and '\\' not in line:
-            self.state.pop()
-            return True
 
 #        if self._comment_block_start_re.match(line):
 #            if cur != self._IN_COMMENT:
@@ -264,6 +254,21 @@ class FileParser:
         final = [l for l in final if re.search("^\s*$", l) is None]
         return "\n".join(final) + "\n"
 
+    def _strip_macros(self, buf):
+        ret = ""
+        inmacro = False
+        for l in buf.split('\n'):
+            if not inmacro and '#' not in l:
+                ret += l + '\n'
+                continue
+            if re.search('\\\s*$', l) is None:
+                if inmacro:
+                    inmacro = False
+                continue
+            else:
+                inmacro = True
+        return ret
+
     def _make_pretty(self, buf):
         ret = ""
         indent = 0
@@ -287,6 +292,9 @@ class FileParser:
 
         # First strip all the comments
         content = self._strip_comments(content)
+
+        # Strip all the macros
+        content = self._strip_macros(content)
 
         # Cull any string literals, they could have problematic things and we
         # just don't care
@@ -326,8 +334,8 @@ class FileParser:
         #   {
         #      bar();
         #   }
-        content = re.sub("^(.+\)(?!;))\s(.+;)$", r'\1\n{\n\2\n}', content,
-                         flags=re.MULTILINE)
+        content = re.sub("^(\s*\w+\s*\(.*\)(?!;))\s(.+;)$", r'\1\n{\n\2\n}',
+                         content, flags=re.MULTILINE)
 
         # And now the same thing above, except for else, cause it's special
         content = re.sub("^(.*else)\s(.+;)$", r'\1\n{\n\2\n}', content,
@@ -338,10 +346,6 @@ class FileParser:
         content = self._make_pretty(content)
 
         for line in content.split('\n'):
-            if self._skip_line(line):
-                buf = ""
-                continue
-
             buf += line + "\n"
 
             if self._statement_re.match(buf) is None:

@@ -26,6 +26,9 @@ int foo(int a)
     return a;
 }
 
+#define some_long_macro() \
+    foo()
+
 struct abc {
     int a;
     u64 b;
@@ -125,6 +128,9 @@ int main(int argc, char **argv)
     pointer(&some->weirdness);
 
     if (i == 1) ifcall();
+
+    i = (1 + 1) \
+        2;
 
     do {
         boo(1, 2);
