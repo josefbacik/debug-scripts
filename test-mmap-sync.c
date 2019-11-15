@@ -11,8 +11,8 @@
 
 static int file_fd;
 static uint64_t filesize = 1024 * 1024 * 1024;
-static uint64_t bs = 4096;
-static int nr_threads = 32;
+static uint64_t bs = 128 * 1024 * 1024;
+static int nr_threads = 3;
 static int loops = 100000;
 
 #define ALIGN(x, a) (((x) + (a) - 1) & ~((a) - 1))
@@ -33,15 +33,13 @@ static void *sync_file(void *arg)
 	int i, ret;
 
 	for (i = 0; i < loops; i++) {
-		uint64_t size, offset;
-		get_offset_size(&offset, &size);
-
-		ret = sync_file_range(file_fd, offset, size,
+		ret = sync_file_range(file_fd, 0, filesize,
 				SYNC_FILE_RANGE_WRITE);
 		if (ret) {
 			perror("Couldn't sync");
 			break;
 		}
+		sleep(2);
 	}
 	return NULL;
 }
@@ -50,6 +48,7 @@ static void *mwrite_file(void *arg)
 {
 	char fill = random();
 	char *ptr = mmap(NULL, filesize, PROT_WRITE, MAP_SHARED, file_fd, 0);
+	uint64_t offset = 0;
 	int i;
 
 	if (ptr == MAP_FAILED) {
@@ -58,11 +57,11 @@ static void *mwrite_file(void *arg)
 	}
 
 	for (i = 0; i < loops; i++) {
-		uint64_t size, offset;
-		get_offset_size(&offset, &size);
-		size -= 1;
-
-		memset(ptr + offset, fill, size);
+		for (offset = bs; offset < filesize; offset += bs) {
+			uint64_t off = offset - (1024 * 1024);
+			uint64_t size = 2 * 1024 * 1024;
+			memset(ptr + off, fill, size);
+		}
 	}
 	return NULL;
 }
@@ -72,6 +71,7 @@ static void *write_file(void *arg)
 	char fill = random();
 	char *buf;
 	ssize_t ret;
+	uint64_t offset;
 	int i;
 
 	buf = malloc(bs);
@@ -82,10 +82,7 @@ static void *write_file(void *arg)
 
 	memset(buf, fill, bs);
 	for (i = 0; i < loops; i++) {
-		uint64_t size, offset;
-		get_offset_size(&offset, &size);
-
-		for (; offset < (offset + size); offset + bs) {
+		for (offset = 0; offset < filesize; offset += bs) {
 			ret = pwrite(file_fd, buf, bs, offset);
 			if (ret < 0) {
 				perror("Failed to write fd");

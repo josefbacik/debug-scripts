@@ -3,6 +3,24 @@ int box(void)
     return 3;
 }
 
+SYSCALL_DEFINE(weird_stuff, int, a, int, b)
+{
+    box();
+    return 4;
+}
+
+int messed_up(void)
+    __releases(&someshit)
+    __acquires(&someothershit)
+{
+    hooray();
+foo:
+    something(); /* als;dkjfal;sdjf */
+bar:
+    something_else();
+    return 0;
+}
+
 int bean(void)
 {
     return 2;

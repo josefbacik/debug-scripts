@@ -20,7 +20,9 @@ funcs = {
           'multiline_if_2' : 'int multiline_if_2(void)',
           'main' : 'int main(int argc, char **argv)',
           'pointer' : 'int pointer(void *blah)',
-          'ifcall' : 'int ifcall(void)'}
+          'ifcall' : 'int ifcall(void)',
+          'weird_stuff': 'int weird_stuff(int a, int b)',
+          'messed_up': 'int messed_up(void)'}
 
 for name in funcs.keys():
     if name not in ft.functions:

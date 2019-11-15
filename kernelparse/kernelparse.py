@@ -231,7 +231,7 @@ class FileParser:
         return True
 
     def _strip_comments(self, buf):
-        buf = re.sub("/\*.*\*/", "", buf)
+        buf = re.sub("/\*.*\*/", '', buf)
 
         # no more comments, return
         if re.search("/\*.*\*/", buf, flags=re.DOTALL) is None:
@@ -274,11 +274,37 @@ class FileParser:
         indent = 0
         for l in buf.split('\n'):
             l = l.strip()
+            if re.search("\w+:", l):
+                ret += '\n' + l
+                continue
             if '}' in l:
                 indent -= 1
             ret += '\n' + '  ' * indent + l
             if '{' in l:
                 indent += 1
+        return ret
+
+    def _expand_syscalls(self, buf):
+        ret = ""
+        for l in buf.split('\n'):
+            if "SYSCALL_DEFINE" not in l:
+                ret += l + '\n'
+                continue
+            m = re.match("SYSCALL_DEFINE\d*\((\w+),\s*(.*)\)$", l)
+            if m is None:
+                print("Our regex didn't work for line '{}'".format(l))
+                ret += l + '\n'
+                continue
+            tmp = "int {}(".format(m.group(1))
+            vartype = True
+            for i in m.group(2).split(','):
+                if vartype:
+                    tmp += "{} ".format(i.strip())
+                    vartype = False
+                else:
+                    tmp += "{}, ".format(i.strip())
+                    vartype = True
+            ret += "{})".format("".join(tmp.rsplit(',', 1)).strip())
         return ret
 
     def parse_file(self, f, ft):
@@ -306,6 +332,8 @@ class FileParser:
         # Just for consistency with testing replace tabs with spaces
         content = re.sub('\t', '    ', content)
 
+        content = re.sub('\s+$', '', content, flags=re.MULTILINE)
+
         # Make sure open braces are on their own line, otherwise it confuses the
         # statement stuff.
         content = re.sub('\{(?!\n)', '{\n', content)
@@ -317,7 +345,7 @@ class FileParser:
         #
         # gets turned into
         #   if (a > b)
-        content = re.sub('(?<![;{})])\n\s*', ' ', content)
+        content = re.sub('(?<![;:{})])\n\s*', ' ', content)
 
         # The above doesn't handle the case of
         #   if (foo()
@@ -341,10 +369,14 @@ class FileParser:
         content = re.sub("^(.*else)\s(.+;)$", r'\1\n{\n\2\n}', content,
                          flags=re.MULTILINE)
 
+        content = re.sub("EXPORT_SYMBOL.*$", '', content, flags=re.MULTILINE)
+        content = self._expand_syscalls(content)
+
         content.strip()
 
         content = self._make_pretty(content)
 
+        print("content is '{}'".format(content))
         for line in content.split('\n'):
             buf += line + "\n"
 
