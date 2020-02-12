@@ -20,7 +20,7 @@ int override_function(struct pt_regs *ctx, struct bio *bio)
 {
     unsigned long rc = RCVAL;
 
-    if (bio->bi_disk->major != 8 || bio->bi_disk->first_minor != 16)
+    if (bio->bi_disk->major != MAJOR || bio->bi_disk->first_minor != MINOR)
         return 0;
 
     /* Make sure we're ready to inject errors. */
@@ -56,12 +56,19 @@ parser.add_argument("-o", "--override", required=True,
 parser.add_argument("-r", "--retval", type=str, help="The return value to use")
 parser.add_argument("-e", "--executable", type=str, required=True,
                     help="The command to run")
+parser.add_argument("-d", "--device", type=str, required=True,
+                    help="The device to error on")
 
 args = parser.parse_args()
 retval = "NULL"
 
 if args.retval is not None:
     retval = args.retval
+
+dev_path = os.path.realpath(args.device)
+dev_st = os.stat(dev_path)
+bpf_text = bpf_text.replace("MAJOR", os.major(dev_st.st_rdev))
+bpf_text = bpf_text.replace("MINOR", os.minor(dev_st.st_rdev))
 
 bpf_text = bpf_text.replace("RCVAL", retval)
 
