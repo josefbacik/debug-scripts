@@ -11,7 +11,6 @@ bpf_text = """
 #include <linux/bio.h>
 #include <linux/blkdev.h>
 
-BPF_CGROUP_ARRAY(cgroup, 1);
 BPF_HASH(seen, u64);
 BPF_ARRAY(enabled, u64, 1);
 BPF_PERF_OUTPUT(events);
@@ -57,8 +56,6 @@ parser.add_argument("-o", "--override", required=True,
 parser.add_argument("-r", "--retval", type=str, help="The return value to use")
 parser.add_argument("-e", "--executable", type=str, required=True,
                     help="The command to run")
-parser.add_argument("-c", "--cgroup", type=str, required=True,
-                    help="Path to the cgroup we'll be using for this")
 
 args = parser.parse_args()
 retval = "NULL"
@@ -68,19 +65,14 @@ if args.retval is not None:
 
 bpf_text = bpf_text.replace("RCVAL", retval)
 
-fd = os.open(args.cgroup, os.O_RDONLY)
-
 print("Loading error injection")
 b = BPF(text=bpf_text)
-
-# Load the cgroup id into the table
-t = b.get_table("cgroup")
-t[0] = fd
 
 # Load the kretprobe first, because we want the delete guy to be in place before
 # the add guy is in place, otherwise we could error out pids that are no longer
 # in our path and cause unfortunate things to happen.
 b.attach_kprobe(event=args.override, fn_name="override_function")
+p = None
 
 def handle_error(cpu, data, size):
     stackid = ct.cast(data, ct.POINTER(ct.c_ulonglong)).contents
@@ -108,6 +100,7 @@ while 1:
             break
 
     print("Waiting for the command to exit")
+    p.send_signal(15)
     p.wait()
 
     p = Popen(["umount", "/mnt/test"])
