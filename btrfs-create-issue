@@ -1,0 +1,22 @@
+#!/bin/bash
+
+_exit() {
+	echo $1
+	exit 1
+}
+
+[ "$#" -ne 2 ] && _exit "btrfs-create-usage <MSGID> <SUBJECT>"
+
+gh --help > /dev/null
+[ $? -ne 0 ] && _exit "Please install gh to use this tool (https://cli.github.com/manual/installation)"
+
+MSG_ID=$1
+
+TEMPLATE="Link to patches
+
+https://lore.kernel.org/linux-btrfs/${MSG_ID}/
+
+b4 am ${MSG_ID}"
+
+gh issue create --title "${2}" --project "Btrfs kernel patch review" \
+	-R "btrfs/linux" --body "${TEMPLATE}"

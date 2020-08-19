@@ -1,0 +1,35 @@
+#!/bin/bash
+
+_exit() {
+	echo $1
+	exit 1
+}
+
+[ "$#" -ne 1 ] && _exit "Must specify a file or directory to send"
+
+MSG_ID=""
+EMAIL=""
+
+if [ -f $1 ]
+then
+	EMAIL=$1
+elif [ -d $1 ]
+then
+	EMAIL=$(find $1 -name "0001*")
+else
+	_exit "Must specify a file or directory to send"
+fi
+
+MSG_ID=$(grep 'Message-Id' $1)
+[ $? -ne 0 ] && _exit "Message-Id wasn't present in the patch provided"
+
+MSG_ID=$(echo ${MSG_ID} | \
+	python -c 'import re,sys; print(re.match("Message-Id: <(.*)>", sys.stdin.read())[1])')
+[ $? -ne 0 ] && _exit "Message-Id couldn't be extracted from the patch provided"
+
+# Just incase somebody includes 'Subject:' in their commit body
+SUBJECT=$(egrep '^Subject:' $1 | head -n1 | cut -c 10-)
+[ $? -ne 0 ] && _exit "Subject wasn't present in the patch provided"
+
+#git send-email $1
+./btrfs-create-issue "${MSG_ID}" "${SUBJECT}"
