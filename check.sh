@@ -11,8 +11,10 @@ dmesg | egrep -q -e "kernel BUG at" \
 	     -e "general protection fault:" \
 	     -e "BUG .* remaining" \
 	     -e "UBSAN:" \
+             -e "leaked"
 
 [ "$?" -eq 0 ] && ~/push.sh "got something" && exit 1
 
+umount /mnt/test
 btrfs device scan --forget
 exit 0

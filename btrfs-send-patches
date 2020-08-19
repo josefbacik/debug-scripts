@@ -31,5 +31,5 @@ MSG_ID=$(echo ${MSG_ID} | \
 SUBJECT=$(egrep '^Subject:' $1 | head -n1 | cut -c 10-)
 [ $? -ne 0 ] && _exit "Subject wasn't present in the patch provided"
 
-#git send-email $1
+git send-email $1
 ./btrfs-create-issue "${MSG_ID}" "${SUBJECT}"

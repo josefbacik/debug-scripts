@@ -67,8 +67,8 @@ if args.retval is not None:
 
 dev_path = os.path.realpath(args.device)
 dev_st = os.stat(dev_path)
-bpf_text = bpf_text.replace("MAJOR", os.major(dev_st.st_rdev))
-bpf_text = bpf_text.replace("MINOR", os.minor(dev_st.st_rdev))
+bpf_text = bpf_text.replace("MAJOR", str(os.major(dev_st.st_rdev)))
+bpf_text = bpf_text.replace("MINOR", str(os.minor(dev_st.st_rdev)))
 
 bpf_text = bpf_text.replace("RCVAL", retval)
 
@@ -92,6 +92,8 @@ def handle_error(cpu, data, size):
 
 b["events"].open_perf_buffer(handle_error)
 
+missed_errors = 0
+
 while 1:
     print("Running command")
     error_tripped = 0
@@ -107,15 +109,19 @@ while 1:
             break
 
     print("Waiting for the command to exit")
-    p.send_signal(15)
     p.wait()
 
     p = Popen(["umount", "/mnt/test"])
     p.wait()
 
     if error_tripped == 0:
-        print("Error injection didn't trip anything, exiting")
-        break
+        missed_errors += 1
+        print("Didn't hit anything, trying again")
+        if missed_errors == 3:
+            print("Error injection didn't trip anything, exiting")
+            break
+    else:
+        missed_errors = 0
 
     t[0] = ct.c_int(0)
 
