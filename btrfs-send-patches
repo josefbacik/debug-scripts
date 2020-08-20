@@ -15,12 +15,13 @@ then
 	EMAIL=$1
 elif [ -d $1 ]
 then
-	EMAIL=$(find $1 -name "0001*")
+	EMAIL=$1/0000-cover-letter.patch
+	[ -f $EMAIL ] || _exit "You must remember to use --cover-letter"
 else
 	_exit "Must specify a file or directory to send"
 fi
 
-MSG_ID=$(grep 'Message-Id' $1)
+MSG_ID=$(grep 'Message-Id' ${EMAIL})
 [ $? -ne 0 ] && _exit "Message-Id wasn't present in the patch provided"
 
 MSG_ID=$(echo ${MSG_ID} | \
@@ -28,7 +29,7 @@ MSG_ID=$(echo ${MSG_ID} | \
 [ $? -ne 0 ] && _exit "Message-Id couldn't be extracted from the patch provided"
 
 # Just incase somebody includes 'Subject:' in their commit body
-SUBJECT=$(egrep '^Subject:' $1 | head -n1 | cut -c 10-)
+SUBJECT=$(egrep '^Subject:' ${EMAIL} | head -n1 | cut -c 10-)
 [ $? -ne 0 ] && _exit "Subject wasn't present in the patch provided"
 
 git send-email $1
