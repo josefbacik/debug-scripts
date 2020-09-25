@@ -1,5 +1,6 @@
 from bcc import BPF
 import ctypes as ct
+import argparse
 
 bpf_text = """
 #include <uapi/linux/ptrace.h>
@@ -13,7 +14,15 @@ sections['end_func'] = ""
 sections['start_func'] = ""
 to_attach = []
 
-def add_main_func(name, func_name, sections, attach):
+def sanitize_name(func):
+    # Some function names get optimized to include .isra in their name, which
+    # makes everything puke, so sanitize these names into something different.
+    if '.' in func:
+        return func.split('.')[0]
+    return func
+
+def add_main_func(func_name, thresh, sections, attach):
+    name = sanitize_name(func_name)
     sections['struct'] += "u64 {}_duration;\n".format(name)
     sections['hashes'] += "BPF_HASH({}_time, u64, u64);\n".format(name)
     sections['start_func'] = """
@@ -36,19 +45,20 @@ int trace_stop_NAME(struct pt_regs *ctx) {
         return 0;
 
     delta = bpf_ktime_get_ns() - *val;
-    if (delta < 1000000L)
+    if (delta < THRESHOLDL)
         return 0;
 
     data_t d = {
-        .pid = pid,
+        .pid = (u32)pid,
         .NAME_duration = delta,
     };
-""".replace('NAME', name)
+""".replace('NAME', name).replace('THRESHOLD', str(thresh))
     attach.append((name, func_name))
 
     return "{}_duration".format(name)
 
-def add_function(name, func_name, sections, attach, siblings):
+def add_function(func_name, sections, attach, siblings):
+    name = sanitize_name(func_name)
     siblings.append("{}_duration".format(name))
     sections['struct'] += "u64 {}_duration;\n".format(name)
     sections['hashes'] += "BPF_HASH({}_start, u64, u64);\n".format(name)
@@ -92,21 +102,18 @@ int trace_stop_NAME(struct pt_regs *ctx) {
 
 siblings = []
 
-main = add_main_func('write', "btrfs_file_write_iter", sections, to_attach)
-add_function('dirty_pages', "btrfs_dirty_pages", sections, to_attach, siblings)
-add_function('get_extent', "btrfs_get_extent", sections, to_attach, siblings)
-add_function('buffered_write', "btrfs_buffered_write.isra.31", sections,
-             to_attach, siblings)
-add_function('add_delalloc', 'btrfs_set_extent_delalloc', sections, to_attach,
-             siblings)
-add_function('clear_extent', 'clear_extent_bit', sections, to_attach, siblings)
-add_function('page_dirty', 'set_page_dirty', sections, to_attach, siblings)
-add_function('mark_dirty', '__mark_inode_dirty', sections, to_attach, siblings)
-add_function('balance', 'balance_dirty_pages_ratelimited', sections, to_attach,
-             siblings)
-add_function('attach_wb', '__inode_attach_wb', sections, to_attach, siblings)
-add_function('lock', 'locked_inode_to_wb_and_lock_list', sections, to_attach,
-             siblings)
+parser = argparse.ArgumentParser(description="Trace some bullshit")
+parser.add_argument('--children', type=str, nargs='+', default=[],
+                    help="Any children you want to trace under the main function")
+parser.add_argument('--main', type=str, required=True,
+                    help="The main function to trace")
+parser.add_argument('--threshold', type=int, default=1000000,
+                    help="Only worry about events that take X ns, defaults to 1ms")
+args = parser.parse_args()
+
+main = add_main_func(args.main, args.threshold, sections, to_attach)
+for c in args.children:
+    add_function(c, sections, to_attach, siblings)
 
 sections['end_func'] += """
     events.perf_submit(ctx, &d, sizeof(d));
@@ -137,7 +144,7 @@ def print_val(event, name):
 
 def print_data(cpu, data, size):
     event = b['events'].event(data)
-    print("{} took {} ns to write".format(event.pid, getattr(event, main)))
+    print("{} took {} ns".format(event.pid, getattr(event, main)))
     for n in siblings:
         print_val(event, n)
 
