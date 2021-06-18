@@ -1,6 +1,7 @@
 from bcc import BPF
 import ctypes as ct
 import argparse
+import subprocess
 
 bpf_text = """
 #include <uapi/linux/ptrace.h>
@@ -147,6 +148,7 @@ def print_data(cpu, data, size):
     print("{} took {} ns".format(event.pid, getattr(event, main)))
     for n in siblings:
         print_val(event, n)
+    subprocess.run(['kernelctl', 'walker'])
 
 b["events"].open_perf_buffer(print_data)
 
