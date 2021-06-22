@@ -1,7 +1,9 @@
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/vfs.h>
+#include <libgen.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -26,22 +28,35 @@ struct btrfs_usage {
 	u64 unallocated;
 };
 
+struct create_args {
+	const char *type;
+	int thread_nr;
+	int flags;
+	int nr_files;
+	unsigned align:1;
+	unsigned setup:1;
+	unsigned falloc:1;
+	unsigned fill:1;
+};
+
 struct file_info {
 	u64 size;
 	struct file_info *next;
 };
 
-enum falloc_option {
-	NO_FALLOC,
-	FALLOC_NO_FILL,
-	FALLOC_FILL,
-};
-
 static struct option long_options[] = {
-	{"help",	no_argument,	0,	'h'},
+	{"help",		no_argument,		0,	'h'},
+	{"meta-threads",	required_argument,	0,	'm'},
+	{"data-threads",	required_argument,	0,	'd'},
+	{"direct-threads",	required_argument,	0,	'D'},
+	{"oappend-threads",	required_argument,	0,	'o'},
+	{"falloc-threads",	required_argument,	0,	'f'},
+	{"falloc-fill-threads",	required_argument,	0,	'F'},
+	{"runtime",		required_argument,	0,	'r'},
+	{"bufsize",		required_argument,	0,	'b'},
 	{NULL,		0,		NULL,	0},
 };
-const char *optstr = "h";
+const char *optstr = "hm:d:D:o:f:F:r:b:";
 
 static char *path;
 static int total_spaces = 0;
@@ -52,8 +67,8 @@ static int oappend_threads = 4;
 static int odirect_threads = 4;
 static int falloc_threads = 4;
 static int falloc_fill_threads = 0;
-static int meta_threads = 0;
-static int nr_loops = 100;
+static int meta_threads = 4;
+static int runtime = 120;
 
 static pthread_cond_t fill_cond;
 static pthread_cond_t ready_cond;
@@ -61,13 +76,123 @@ static pthread_mutex_t mutex;
 static int filling_threads = 0;
 static int ready = 0;
 static int enospc_errors = 0;
+static struct timeval start;
 
 char *buf = NULL;
-u64 buf_size = 1024 * 1024 * 1024;
+u64 buf_size = 128 * 1024 * 1024;
+
+static void print_giant_text(char *text)
+{
+	char line[81];
+	char *cur, *prev, *first;
+	unsigned len;
+
+	cur = first = text;
+	while ((cur = strchr(cur, ' ')) != NULL) {
+
+		if (cur - first < 80) {
+			prev = cur;
+			cur++;
+			continue;
+		}
+
+		len = prev - first;
+		memcpy(line, first, len);
+		line[len] = '\n';
+		line[len + 1] = '\0';
+		printf(line);
+		first = prev + 1;
+		prev = cur;
+		cur++;
+	}
+
+	if (prev != first) {
+		len = prev - first;
+		memcpy(line, first, len);
+		line[len] = '\n';
+		line[len + 1] = '\0';
+		printf(line);
+	}
+}
+
+static char *help_msg =
+	"All threads default to 4, with the exception of falloc-fill. The "
+	"way btrfs's enospc system works is we assume we can't fill prealloc "
+	"area and will reserve anyway, and then check for real if we "
+	"fail the reservation. This means with falloc-fill we'll easily "
+	"allocate the whole drive as data before metadata can catch up "
+	"which makes the test not really work as expected if you have "
+	"small test devices.  Only use it if you're spefically testing "
+	"falloc-fill scenarios with a large enough device. "
+	"The buffer is seeded with /dev/urandom. "
+	"All threads create new files and write to them on each loop, "
+	"with the exception of the O_APPEND threads which will fill "
+	"one file per threads. Each write is a random size of the overall "
+	"buffer size, so we will write between 1 and BUFSIZE bytes.";
 
 static void print_usage(char *cmd)
 {
-	printf("%s usage: %s [-h] /path", cmd, cmd);
+	printf("%s usage: %s [options] /path\n", basename(cmd), basename(cmd));
+	printf("where [options] can be any of\n");
+	printf("\t--help,-h\t\t\tPrint this message.\n");
+	printf("\t--meta-threads,-m\t\tNumber of metadata filler threads.\n");
+	printf("\t--data-threads,-d\t\tNumber of data filler threads.\n");
+	printf("\t--direct-threads,-D\t\tNumber of O_DIRECT data filler threads.\n");
+	printf("\t--oappend-threads,-o\t\tNumber of O_APPEND data filler threads.\n");
+	printf("\t--falloc-threads,-f\t\tNumber of fallocate() filler threads.\n");
+	printf("\t--falloc-fill-threads,-F\tNumber of fallocate() and then fill filler threads.\n");
+	printf("\t--runtime,-r\t\t\tNumber of seconds to run (120 by default).\n");
+	printf("\t--bufsize,-b\t\t\tThe size of the buffer to use for writing in MiB (1GiB by default).\n");
+	printf("\n");
+	print_giant_text(help_msg);
+}
+
+static int add_file_info(struct create_args *args, struct file_info **head,
+			 u64 written)
+{
+	struct file_info *file = malloc(sizeof(struct file_info));
+	if (!file)
+		return -1;
+	file->size = written;
+	file->next = *head;
+	*head = file;
+	args->nr_files++;
+	return 0;
+}
+
+static void trim_files(struct create_args *args, struct file_info **head)
+{
+	int to_cull;
+
+	if (args->fill)
+		return;
+
+	to_cull = args->nr_files >> 3;
+
+	while (to_cull) {
+		struct file_info *file = *head;
+		*head = file->next;
+		free(file);
+		to_cull--;
+	}
+}
+
+static void free_files(struct create_args *args, struct file_info **head)
+{
+	struct file_info *file;
+	int nr = 0;
+	u64 size = 0;
+
+	while (*head) {
+		file = *head;
+		*head = file->next;
+		nr++;
+		size += file->size;
+		free(file);
+	}
+
+	printf("%s thread %d had %d files writing %lu bytes\n",
+	       args->type, args->thread_nr, nr, size);
 }
 
 static void filling_finished(void)
@@ -80,7 +205,6 @@ static void filling_finished(void)
 	while (!ready)
 		pthread_cond_wait(&ready_cond, &mutex);
 
-	printf("ok starting\n");
 	pthread_mutex_unlock(&mutex);
 }
 
@@ -91,6 +215,19 @@ static void report_enospc_error(const char *thread_type, int thread_nr)
 	pthread_mutex_lock(&mutex);
 	enospc_errors++;
 	pthread_mutex_unlock(&mutex);
+}
+
+static int finished(void)
+{
+	struct timeval cur;
+	int delta;
+
+	if (!runtime)
+		return 0;
+
+	gettimeofday(&cur, NULL);
+	delta = cur.tv_sec - start.tv_sec;
+	return delta >= runtime;
 }
 
 static int get_btrfs_usage(struct btrfs_usage *usage)
@@ -205,7 +342,7 @@ static int check_early_enospc(void)
 
 	printf("data_free %lu bytes, meta_free %lu bytes unallocated %lu\n",
 	       usage.data_free, usage.meta_free, usage.unallocated);
-	if (usage.data_free > FREE_THRESH || usage.meta_free > FREE_THRESH) {
+	if (usage.data_free > FREE_THRESH && usage.meta_free > FREE_THRESH) {
 		fprintf(stderr, "We have free data and metadata space\n");
 		return -1;
 	}
@@ -240,32 +377,26 @@ static int create_thread_dir(int thread_nr)
 	return 0;
 }
 
-static size_t get_chunk(u64 write_amount, int small_chunk, int align)
+static size_t get_chunk(struct create_args *args, struct file_info *file)
 {
 	size_t chunk;
 
-	if (write_amount < 4096)
-		return write_amount;
+	if (file)
+		return file->size;
+
+	if (args && !args->fill && !args->falloc)
+		return 0;
 
 	do {
-		if (small_chunk)
-			chunk = 4096;
-		else
-			chunk = random() % buf_size;
-
-		if (align)
+		chunk = random() % buf_size;
+		if (args && args->align)
 			chunk = (chunk + 4095) & (~4096);
-
-		if (!chunk)
-			continue;
-		if (chunk > write_amount)
-			chunk = write_amount;
 	} while (chunk == 0);
 
 	return chunk;
 }
 
-static int write_chunk(int fd, size_t amount, size_t *written)
+static int write_chunk(int fd, size_t amount)
 {
 	ssize_t ret;
 	size_t pos = 0;
@@ -280,223 +411,261 @@ static int write_chunk(int fd, size_t amount, size_t *written)
 		}
 		pos += ret;
 		amount -= ret;
-		*written += ret;
 	}
 
 	return 0;
 }
 
-static int write_file(int fd, u64 write_amount, u64 *written, int align)
+static u64 write_file(int fd, u64 write_amount)
 {
 	u64 total_written = 0;
 	int ret;
-	int small_chunk = 0;
 
 	while ((write_amount == (u64)-1) || total_written < write_amount) {
-		size_t chunk = get_chunk(write_amount, small_chunk, align);
-		ret = write_chunk(fd, chunk, &total_written);
-		if (ret) {
-			if (errno != ENOSPC || small_chunk ||
-			    write_amount != (u64)-1)
-				break;
-			small_chunk = 1;
-		}
+		size_t chunk = get_chunk(NULL, NULL);
+		if (chunk > (write_amount - total_written))
+			chunk = write_amount - total_written;
+		ret = write_chunk(fd, chunk);
+		if (ret)
+			return total_written;
+		total_written += chunk;
 	}
 
-	if (write_amount == (u64)-1)
-		*written = total_written;
-
-	return ret;
+	return total_written;
 }
 
-static int falloc_file(int fd, u64 write_amount, u64 *written)
+static void *oappend_writer(void *arg)
 {
-	u64 pos = 0;
-	u64 total_written = 0;
-	int small_chunk = 0;
-	int ret;
-
-	while ((write_amount == (u64)-1) || total_written < write_amount) {
-		size_t chunk = get_chunk(write_amount, small_chunk, 1);
-
-		ret = fallocate(fd, 0, pos, chunk);
-		if (ret < 0) {
-			if (errno != ENOSPC || small_chunk ||
-			    write_amount != (u64)-1)
-				break;
-			small_chunk = 1;
-		} else {
-			total_written += chunk;
-			pos += chunk;
-		}
-	}
-
-	if (write_amount == (u64)-1)
-		*written = total_written;
-
-	return ret;
-}
-
-static void fill_file(const char *thread_type, int thread_nr, int flags,
-		      int align, enum falloc_option falloc)
-{
+	int thread_nr = *(int *)arg;
 	u64 write_amount = (u64)-1;
 	u64 written;
-	int loops = nr_loops;
 	char file[PATH_MAX];
 	int fd;
 	int ret;
 
 	if (create_thread_dir(thread_nr))
-		return;
+		return NULL;
 
 	snprintf(file, PATH_MAX, "%s/thread_%d/file", path, thread_nr);
 
 	do {
-		fd = open(file, flags, 0600);
+		if (write_amount != (u64)-1) {
+			ret = unlink(file);
+			if (ret) {
+				report_enospc_error("oappend writer",
+						    thread_nr);
+				break;
+			}
+		}
+
+		fd = open(file, O_CREAT|O_WRONLY|O_APPEND, 0600);
 		if (fd < 0) {
 			fprintf(stderr, "failed to open %s: %d (%s)\n", file,
 				errno, strerror(errno));
 			break;
 		}
 
-		if (falloc != NO_FALLOC) {
-			ret = falloc_file(fd, write_amount, &written);
-			if (ret < 0 && errno == ENOSPC) {
-				if (write_amount != (u64)-1) {
-					report_enospc_error(thread_type,
-							    thread_nr);
-					break;
-				} else if (falloc == FALLOC_NO_FILL) {
-					filling_finished();
-				}
-				write_amount = written;
-			} else if (ret < 0) {
-				break;
-			}
-		}
-
-		ret = write_file(fd, write_amount, &written, align);
-		if (ret < 0 && errno == ENOSPC) {
-			if (write_amount != (u64)-1) {
-				report_enospc_error(thread_type, thread_nr);
-				break;
-			} else {
-				filling_finished();
-			}
+		written = write_file(fd, write_amount);
+		if (write_amount == (u64)-1) {
+			fsync(fd);
+			filling_finished();
 			write_amount = written;
-		} else if (ret < 0) {
+		} else if (written != write_amount) {
+			report_enospc_error("oappend writer", thread_nr);
 			break;
 		}
 
-		ret = fsync(fd);
-		if (ret < 0) {
-			fprintf(stderr, "fsync failed in write thread: %d (%s)\n",
-				errno, strerror(errno));
-			break;
-		}
 		close(fd);
-		unlink(file);
-	} while (!enospc_errors && (!loops || (--loops > 0)));
+	} while (!enospc_errors && !finished());
+
+	return NULL;
 }
 
-static int generate_small_files(int thread_nr, int nr_files)
+static int generate_files(struct create_args *args, struct file_info **head)
 {
-	char file[PATH_MAX];
+	struct file_info *file = *head;
+	char name[PATH_MAX];
 	int files_created = 0;
 	int fd;
+	int ret = 0;
+
+	if (args->setup) {
+		if (create_thread_dir(args->thread_nr))
+			return -1;
+	} else {
+		file = *head;
+	}
 
 	do {
-		snprintf(file, PATH_MAX, "%s/thread_%d/file_%d", path,
-			 thread_nr, files_created);
-		fd = open(file, O_WRONLY|O_CREAT, 0600);
-		if (fd < 0)
-			break;
-		close(fd);
-		files_created++;
-	} while (!enospc_errors &&
-		 ((nr_files == -1) || files_created < nr_files));
+		size_t written = get_chunk(args, file);
 
-	return files_created;
+		snprintf(name, PATH_MAX, "%s/thread_%d/file_%d", path,
+			 args->thread_nr, files_created);
+		fd = open(name, args->flags, 0600);
+		if (fd < 0) {
+			ret = -1;
+			break;
+		}
+
+		if (args->falloc) {
+			ret = fallocate(fd, 0, 0, written);
+			if (ret)
+				break;
+		}
+
+		if (args->fill) {
+			ret = write_chunk(fd, written);
+			if (ret)
+				break;
+		}
+
+		/*
+		 * We fsync() so we can have a stable amount of stuff on disk
+		 * during setup, and then we know once we're done setting up
+		 * we'll really be able to store everything on disk.
+		 */
+		if (args->setup) {
+			ret = fsync(fd);
+			if (ret)
+				break;
+		}
+		close(fd);
+
+		if (args->setup) {
+			ret = add_file_info(args, head, written);
+			if (ret) {
+				fprintf(stderr, "Ran out of memory for files\n");
+				break;
+			}
+		} else {
+			file = file->next;
+		}
+		files_created++;
+	} while (!enospc_errors & (args->setup || file));
+
+	return ret;
+}
+
+static int unlink_files(struct create_args *args, struct file_info *file)
+{
+	char name[PATH_MAX];
+	int ret = 0, i;
+
+	for (i = 0; file; file = file->next, i++) {
+		snprintf(name, PATH_MAX, "%s/thread_%d/file_%d", path,
+			 args->thread_nr, i);
+		ret = unlink(name);
+		if (ret)
+			break;
+	}
+	return ret;
+}
+
+static int create_files_thread(struct create_args *args)
+{
+	struct file_info *head = NULL;
+	int ret;
+	int need_trim = 1;
+
+	printf("%s starting thread %d\n", args->type, args->thread_nr);
+
+	args->setup = 1;
+	ret = generate_files(args, &head);
+	if (ret && errno != ENOSPC) {
+		fprintf(stderr, "%s thread %d failed: %d (%s)\n",
+			args->type, args->thread_nr, errno, strerror(errno));
+		return -1;
+	}
+	filling_finished();
+	args->setup = 0;
+
+	do {
+		ret = unlink_files(args, head);
+		if (ret) {
+			report_enospc_error(args->type, args->thread_nr);
+			break;
+		}
+
+		if (need_trim) {
+			trim_files(args, &head);
+			need_trim = 0;
+		}
+
+		ret = generate_files(args, &head);
+		if (ret) {
+			report_enospc_error(args->type, args->thread_nr);
+			break;
+		}
+	} while (!enospc_errors && !finished());
+
+	free_files(args, &head);
+
+	return ret;
 }
 
 static void *data_writer(void *arg)
 {
-	int thread_nr = *(int *)arg;
+	struct create_args args = {
+		.type = "data writer",
+		.thread_nr = *(int *)arg,
+		.flags = O_CREAT|O_WRONLY,
+		.fill = 1,
+	};
 
-	printf("starting thread %d\n", thread_nr);
-	fill_file("data writer", thread_nr, O_CREAT|O_WRONLY, 0, NO_FALLOC);
-	return NULL;
-}
-
-static void *oappend_writer(void *arg)
-{
-	int thread_nr = *(int *)arg;
-
-	printf("starting thread %d\n", thread_nr);
-	fill_file("oappend writer", thread_nr, O_CREAT|O_WRONLY|O_APPEND, 0, NO_FALLOC);
+	create_files_thread(&args);
 	return NULL;
 }
 
 static void *odirect_writer(void *arg)
 {
-	int thread_nr = *(int *)arg;
+	struct create_args args = {
+		.type = "odirect writer",
+		.thread_nr = *(int *)arg,
+		.flags = O_CREAT|O_WRONLY|O_DIRECT,
+		.align = 1,
+		.fill = 1,
+	};
 
-	printf("starting thread %d\n", thread_nr);
-	fill_file("odirect writer", thread_nr, O_CREAT|O_WRONLY|O_DIRECT, 1, NO_FALLOC);
+	create_files_thread(&args);
 	return NULL;
 }
 
 static void *falloc_nofill(void *arg)
 {
-	int thread_nr = *(int *)arg;
+	struct create_args args = {
+		.type = "falloc no fill",
+		.thread_nr = *(int *)arg,
+		.flags = O_CREAT|O_WRONLY,
+		.falloc = 1,
+	};
 
-	printf("starting thread %d\n", thread_nr);
-	fill_file("falloc nofill", thread_nr, O_CREAT|O_WRONLY, 0, FALLOC_NO_FILL);
+	create_files_thread(&args);
 	return NULL;
 }
 
 static void *falloc_fill(void *arg)
 {
-	int thread_nr = *(int *)arg;
+	struct create_args args = {
+		.type = "falloc fill",
+		.thread_nr = *(int *)arg,
+		.flags = O_CREAT|O_WRONLY,
+		.falloc = 1,
+		.fill = 1,
+	};
 
-	printf("starting thread %d\n", thread_nr);
-	fill_file("falloc fill", thread_nr, O_CREAT|O_WRONLY, 0, FALLOC_FILL);
+	create_files_thread(&args);
 	return NULL;
 }
 
 static void *meta_writer(void *arg)
 {
-	char file[PATH_MAX];
-	int thread_nr = *(int *)arg;
-	int nr_files;
-	int loops = nr_loops, i, ret;
+	struct create_args args = {
+		.type = "meta writer",
+		.thread_nr = *(int *)arg,
+		.flags = O_CREAT|O_WRONLY,
+	};
 
-	if (create_thread_dir(thread_nr))
-		return NULL;
-
-	nr_files = generate_small_files(thread_nr, -1);
-	printf("meta writer finished %d waiting\n", thread_nr);
-	filling_finished();
-
-	do {
-		for (i = 0; i < nr_files; i++) {
-			snprintf(file, PATH_MAX, "%s/thread_%d/file_%d", path,
-				 thread_nr, i);
-			ret = unlink(file);
-			if (ret) {
-				report_enospc_error("meta writer", thread_nr);
-				break;
-			}
-		}
-
-		ret = generate_small_files(thread_nr, nr_files);
-		if (ret != nr_files) {
-			report_enospc_error("meta writer", thread_nr);
-			break;
-		}
-	} while (!enospc_errors && (!loops || (--loops > 0)));
-
+	create_files_thread(&args);
 	return NULL;
 }
 
@@ -655,11 +824,68 @@ int main(int argc, char **argv)
 	int i;
 
 	while ((opt =
-		getopt_long(argc, argv, optstr, long_options, NULL) != -1)) {
+		getopt_long(argc, argv, optstr, long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'h':
 			print_usage(argv[0]);
 			return 0;
+		case 'm':
+			meta_threads = (int)strtol(optarg, NULL, 0);
+			if (errno) {
+				fprintf(stderr, "must specify an int for threads\n");
+				return 1;
+			}
+			break;
+		case 'd':
+			data_threads = (int)strtol(optarg, NULL, 0);
+			if (errno) {
+				fprintf(stderr, "must specify an int for threads\n");
+				return 1;
+			}
+			break;
+		case 'D':
+			odirect_threads = (int)strtol(optarg, NULL, 0);
+			if (errno) {
+				fprintf(stderr, "must specify an int for threads\n");
+				return 1;
+			}
+			break;
+		case 'f':
+			falloc_threads = (int)strtol(optarg, NULL, 0);
+			if (errno) {
+				fprintf(stderr, "must specify an int for threads\n");
+				return 1;
+			}
+			break;
+		case 'F':
+			falloc_fill_threads = (int)strtol(optarg, NULL, 0);
+			if (errno) {
+				fprintf(stderr, "must specify an int for threads\n");
+				return 1;
+			}
+			break;
+		case 'o':
+			oappend_threads = (int)strtol(optarg, NULL, 0);
+			if (errno) {
+				fprintf(stderr, "must specify an int for threads\n");
+				return 1;
+			}
+			break;
+		case 'r':
+			runtime = (int)strtol(optarg, NULL, 0);
+			if (errno) {
+				fprintf(stderr, "must specify an int for runtime\n");
+				return 1;
+			}
+			break;
+		case 'b':
+			buf_size = strtol(optarg, NULL, 0);
+			if (errno) {
+				fprintf(stderr, "must specify an int for bufsize\n");
+				return 1;
+			}
+			buf_size *= 1024 * 1024;
+			break;
 		default:
 			print_usage(argv[0]);
 			return 1;
@@ -739,15 +965,13 @@ int main(int argc, char **argv)
 	}
 	printf("setting ready\n");
 	ready = 1;
+	gettimeofday(&start, NULL);
 	pthread_cond_broadcast(&ready_cond);
 	pthread_mutex_unlock(&mutex);
 
 	for (i = 0; i < total_threads; i++) {
-		if (!threads[i]) {
-			printf("huh?\n");
+		if (!threads[i])
 			continue;
-		}
-		printf("waiting on thread %d\n", (int)threads[i]);
 		pthread_join(threads[i], NULL);
 	}
 
