@@ -164,10 +164,10 @@ static void trim_files(struct create_args *args, struct file_info **head)
 {
 	int to_cull;
 
-	if (args->fill)
+	if (args->fill || args->falloc)
 		return;
 
-	to_cull = args->nr_files >> 3;
+	to_cull = args->nr_files >> 2;
 
 	while (to_cull) {
 		struct file_info *file = *head;
@@ -208,10 +208,11 @@ static void filling_finished(void)
 	pthread_mutex_unlock(&mutex);
 }
 
-static void report_enospc_error(const char *thread_type, int thread_nr)
+static void report_enospc_error(const char *thread_type, const char *op,
+				int thread_nr)
 {
-	fprintf(stderr, "%s: thread %d got an unexpected enospc error\n",
-		thread_type, thread_nr);
+	fprintf(stderr, "%s: thread %d got an unexpected enospc error doing %s\n",
+		thread_type, thread_nr, op);
 	pthread_mutex_lock(&mutex);
 	enospc_errors++;
 	pthread_mutex_unlock(&mutex);
@@ -452,7 +453,7 @@ static void *oappend_writer(void *arg)
 		if (write_amount != (u64)-1) {
 			ret = unlink(file);
 			if (ret) {
-				report_enospc_error("oappend writer",
+				report_enospc_error("oappend writer", "unlink",
 						    thread_nr);
 				break;
 			}
@@ -471,7 +472,8 @@ static void *oappend_writer(void *arg)
 			filling_finished();
 			write_amount = written;
 		} else if (written != write_amount) {
-			report_enospc_error("oappend writer", thread_nr);
+			report_enospc_error("oappend writer", "writing",
+					    thread_nr);
 			break;
 		}
 
@@ -577,12 +579,20 @@ static int create_files_thread(struct create_args *args)
 		return -1;
 	}
 	filling_finished();
+
+	if (head == NULL) {
+		printf("%s: thread %d didn't get any fils setup during setup "
+		       "phase, exiting\n", args->type, args->thread_nr);
+		return 0;
+	}
+
 	args->setup = 0;
 
 	do {
 		ret = unlink_files(args, head);
 		if (ret) {
-			report_enospc_error(args->type, args->thread_nr);
+			report_enospc_error(args->type, "unlink",
+					    args->thread_nr);
 			break;
 		}
 
@@ -593,7 +603,8 @@ static int create_files_thread(struct create_args *args)
 
 		ret = generate_files(args, &head);
 		if (ret) {
-			report_enospc_error(args->type, args->thread_nr);
+			report_enospc_error(args->type, "generate",
+					    args->thread_nr);
 			break;
 		}
 	} while (!enospc_errors && !finished());
