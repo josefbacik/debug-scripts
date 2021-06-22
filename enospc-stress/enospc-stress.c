@@ -524,7 +524,7 @@ static int generate_files(struct create_args *args, struct file_info **head)
 		 * during setup, and then we know once we're done setting up
 		 * we'll really be able to store everything on disk.
 		 */
-		if (args->setup) {
+		if (args->setup && args->fill) {
 			ret = fsync(fd);
 			if (ret)
 				break;
