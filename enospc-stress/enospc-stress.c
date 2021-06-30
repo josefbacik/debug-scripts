@@ -1,4 +1,6 @@
+#include <bpf/libbpf.h>
 #include <sys/ioctl.h>
+#include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -20,13 +22,12 @@
 #include <linux/btrfs_tree.h>
 #include <linux/limits.h>
 
-#define u64 uint64_t
+#include "enospc-stress.skel.h"
+#include "common.h"
 
-struct btrfs_usage {
-	u64 data_free;
-	u64 meta_free;
-	u64 unallocated;
-};
+#ifndef u64
+#define u64 uint64_t
+#endif
 
 struct create_args {
 	const char *type;
@@ -59,9 +60,7 @@ static struct option long_options[] = {
 const char *optstr = "hm:d:D:o:f:F:r:b:";
 
 static char *path;
-static int total_spaces = 0;
 static int fs_fd;
-static u64 fs_size = 0;
 static int data_threads = 4;
 static int oappend_threads = 4;
 static int odirect_threads = 4;
@@ -77,6 +76,8 @@ static int filling_threads = 0;
 static int ready = 0;
 static int enospc_errors = 0;
 static struct timeval start;
+static struct ring_buffer *rb = NULL;
+static u64 free_thresh = 0;
 
 char *buf = NULL;
 u64 buf_size = 128 * 1024 * 1024;
@@ -145,6 +146,25 @@ static void print_usage(char *cmd)
 	printf("\t--bufsize,-b\t\t\tThe size of the buffer to use for writing in MiB (1GiB by default).\n");
 	printf("\n");
 	print_giant_text(help_msg);
+}
+
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format,
+			   va_list args)
+{
+	return vfprintf(stderr, format, args);
+}
+
+static void bump_memlock_rlimit(void)
+{
+	struct rlimit rlim_new = {
+		.rlim_cur	= RLIM_INFINITY,
+		.rlim_max	= RLIM_INFINITY,
+	};
+
+	if (setrlimit(RLIMIT_MEMLOCK, &rlim_new)) {
+		fprintf(stderr, "Failed to increase RLIMIT_MEMLOCK limit!\n");
+		exit(1);
+	}
 }
 
 static int add_file_info(struct create_args *args, struct file_info **head,
@@ -231,135 +251,53 @@ static int finished(void)
 	return delta >= runtime;
 }
 
-static int get_btrfs_usage(struct btrfs_usage *usage)
-{
-	struct btrfs_ioctl_space_args *sargs;
-	struct btrfs_ioctl_space_info *sp;
-	u64 mask = BTRFS_BLOCK_GROUP_TYPE_MASK | BTRFS_SPACE_INFO_GLOBAL_RSV;
-	u64 used = 0;
-	int ret, i;
-
-	usage->data_free = 0;
-	usage->meta_free = 0;
-	usage->unallocated = 0;
-
-	if (!total_spaces) {
-		sargs = malloc(sizeof(struct btrfs_ioctl_space_args));
-		if (!sargs) {
-			fprintf(stderr, "Failed to alloc sargs\n");
-			return -1;
-		}
-		sargs->space_slots = 0;
-		sargs->total_spaces = 0;
-		ret = ioctl(fs_fd, BTRFS_IOC_SPACE_INFO, sargs);
-		if (ret < 0) {
-			fprintf(stderr, "Failed to get space info %d (%s)\n",
-				errno, strerror(errno));
-			free(sargs);
-			return -1;
-		}
-		total_spaces = sargs->total_spaces;
-		free(sargs);
-	}
-
-	sargs = malloc(sizeof(struct btrfs_ioctl_space_args) +
-		       (total_spaces * sizeof(struct btrfs_ioctl_space_info)));
-	if (!sargs) {
-		fprintf(stderr, "Failed to alloc sargs\n");
-		return -1;
-	}
-
-	sargs->space_slots = total_spaces;
-	sargs->total_spaces = 0;
-	ret = ioctl(fs_fd, BTRFS_IOC_SPACE_INFO, sargs);
-	if (ret < 0) {
-		fprintf(stderr, "Failed to get space info %d (%s)\n",
-			errno, strerror(errno));
-		free(sargs);
-		return -1;
-	}
-
-	sp = sargs->spaces;
-	for (i = 0; i < sargs->total_spaces; i++, sp++) {
-		u64 flags = sp->flags & mask;
-		if (flags ==
-		    (BTRFS_BLOCK_GROUP_DATA|BTRFS_BLOCK_GROUP_METADATA)) {
-			usage->data_free += sp->total_bytes - sp->used_bytes;
-			usage->meta_free += sp->total_bytes - sp->used_bytes;
-		} else if (flags == BTRFS_BLOCK_GROUP_DATA) {
-			usage->data_free = sp->total_bytes - sp->used_bytes;
-		} else if (flags == BTRFS_BLOCK_GROUP_METADATA) {
-			usage->meta_free += sp->total_bytes - sp->used_bytes;
-		} else if (flags == BTRFS_SPACE_INFO_GLOBAL_RSV) {
-			usage->meta_free -= sp->total_bytes;
-		}
-
-		if (flags != BTRFS_SPACE_INFO_GLOBAL_RSV)
-			used += sp->total_bytes;
-	}
-	usage->unallocated = fs_size - used;
-	free(sargs);
-	return 0;
-}
-
-/*
- * Ideal we'd do something like search the chunks like btrfs filesystem usage
- * does, but this is close enough.
- */
-static int get_fs_size(void)
-{
-	struct statfs buf;
-	int ret = fstatfs(fs_fd, &buf);
-	int bits;
-
-	if (ret) {
-		fprintf(stderr, "statfs failed: %d (%s)\n", errno,
-			strerror(errno));
-		return -1;
-	}
-	switch (buf.f_bsize) {
-	case 4096:
-		bits = 12;
-		break;
-	case 512:
-		bits = 9;
-		break;
-	default:
-		fprintf(stderr, "We don't have bits for that blocksize, pls fix\n");
-		return -1;
-	}
-
-	fs_size = buf.f_blocks << bits;
-	return 0;
-}
-
 #define FREE_THRESH (1024 * 1024 * 5)
 
-static int check_early_enospc(void)
+static u64 get_total_used(const struct event *e)
 {
-	struct btrfs_usage usage;
+	return e->bytes_used + e->bytes_pinned + e->bytes_may_use +
+		e->bytes_reserved + e->bytes_readonly;
+}
 
-	get_btrfs_usage(&usage);
+static void dump_event(const struct event *e)
+{
+	fprintf(stderr, "Dumping failed tickets event\n");
+	fprintf(stderr, "flags=%lu total_bytes=%lu used=%lu pinned=%lu may_use=%lu reserved=%lu readonly=%lu global_rsv=%lu trans_rsv=%lu delayed_refs_rsv=%lu delayed_rsv=%lu\n",
+		e->flags, e->total_bytes, e->bytes_used, e->bytes_pinned,
+		e->bytes_may_use, e->bytes_reserved, e->bytes_readonly,
+		e->global_rsv, e->trans_rsv, e->delayed_refs_rsv,
+		e->delayed_rsv);
+}
 
-	printf("data_free %lu bytes, meta_free %lu bytes unallocated %lu\n",
-	       usage.data_free, usage.meta_free, usage.unallocated);
-	if (usage.data_free > FREE_THRESH && usage.meta_free > FREE_THRESH) {
-		fprintf(stderr, "We have free data and metadata space\n");
-		return -1;
+int handle_event(void *ctx, void *data, size_t data_sz)
+{
+	const struct event *e = (const struct event *)data;
+	u64 used = get_total_used(e);
+
+	dump_event(e);
+
+	if (e->total_bytes > used &&
+	    ((e->total_bytes - used) > free_thresh)) {
+		fprintf(stderr, "Too much space left\n");
+		enospc_errors++;
 	}
 
-	if (usage.unallocated && (!usage.data_free || !usage.meta_free)) {
-		/*
-		 * Sometimes we don't allocate the last little bit because of
-		 * alignment reasons.
-		 */
-		if (usage.unallocated <= FREE_THRESH)
-			return 0;
-		fprintf(stderr, "We still have unallocated space\n");
-		return -1;
+	if (e->flags & BTRFS_BLOCK_GROUP_METADATA) {
+		if (e->bytes_may_use != e->global_rsv) {
+			fprintf(stderr, "We have more may_use than the global_rsv\n");
+			enospc_errors++;
+		}
 	}
 
 	return 0;
+}
+
+void safe_poll_events(u64 written)
+{
+	pthread_mutex_lock(&mutex);
+	free_thresh = written + FREE_THRESH;
+	ring_buffer__poll(rb, 100);
+	pthread_mutex_unlock(&mutex);
 }
 
 static int create_thread_dir(int thread_nr)
@@ -472,9 +410,7 @@ static void *oappend_writer(void *arg)
 			filling_finished();
 			write_amount = written;
 		} else if (written != write_amount) {
-			report_enospc_error("oappend writer", "writing",
-					    thread_nr);
-			break;
+			safe_poll_events(write_amount);
 		}
 
 		close(fd);
@@ -503,22 +439,30 @@ static int generate_files(struct create_args *args, struct file_info **head)
 
 		snprintf(name, PATH_MAX, "%s/thread_%d/file_%d", path,
 			 args->thread_nr, files_created);
+		ret = 0;
 		fd = open(name, args->flags, 0600);
 		if (fd < 0) {
-			ret = -1;
+			if (errno == ENOSPC)
+				safe_poll_events(0);
+			else
+				return -1;
 			break;
 		}
 
 		if (args->falloc) {
 			ret = fallocate(fd, 0, 0, written);
-			if (ret)
+			if (ret) {
+				safe_poll_events(written);
 				break;
+			}
 		}
 
 		if (args->fill) {
 			ret = write_chunk(fd, written);
-			if (ret)
+			if (ret) {
+				safe_poll_events(written);
 				break;
+			}
 		}
 
 		/*
@@ -528,8 +472,10 @@ static int generate_files(struct create_args *args, struct file_info **head)
 		 */
 		if (args->setup && args->fill) {
 			ret = fsync(fd);
-			if (ret)
+			if (ret) {
+				safe_poll_events(0);
 				break;
+			}
 		}
 		close(fd);
 
@@ -537,7 +483,7 @@ static int generate_files(struct create_args *args, struct file_info **head)
 			ret = add_file_info(args, head, written);
 			if (ret) {
 				fprintf(stderr, "Ran out of memory for files\n");
-				break;
+				return ret;
 			}
 		} else {
 			file = file->next;
@@ -545,7 +491,7 @@ static int generate_files(struct create_args *args, struct file_info **head)
 		files_created++;
 	} while (!enospc_errors & (args->setup || file));
 
-	return ret;
+	return 0;
 }
 
 static int unlink_files(struct create_args *args, struct file_info *file)
@@ -557,8 +503,13 @@ static int unlink_files(struct create_args *args, struct file_info *file)
 		snprintf(name, PATH_MAX, "%s/thread_%d/file_%d", path,
 			 args->thread_nr, i);
 		ret = unlink(name);
-		if (ret)
+		if (ret) {
+			if (errno == ENOENT) {
+				errno = 0;
+				ret = 0;
+			}
 			break;
+		}
 	}
 	return ret;
 }
@@ -602,11 +553,8 @@ static int create_files_thread(struct create_args *args)
 		}
 
 		ret = generate_files(args, &head);
-		if (ret) {
-			report_enospc_error(args->type, "generate",
-					    args->thread_nr);
+		if (ret)
 			break;
-		}
 	} while (!enospc_errors && !finished());
 
 	free_files(args, &head);
@@ -826,7 +774,7 @@ static void kill_threads(pthread_t *threads, int nr)
 
 int main(int argc, char **argv)
 {
-	struct btrfs_usage usage;
+	struct enospc_stress_bpf *skel;
 	pthread_t *threads;
 	int *thread_nr;
 	int ret;
@@ -908,21 +856,37 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	libbpf_set_print(libbpf_print_fn);
+	bump_memlock_rlimit();
+
+	skel = enospc_stress_bpf__open_and_load();
+	if (!skel) {
+		fprintf(stderr, "Failed to open and load BPF skeleton\n");
+		return 1;
+	}
+
+	ret = enospc_stress_bpf__attach(skel);
+	if (ret) {
+		fprintf(stderr, "Failed to attach BPF skeleton\n");
+		goto out;
+	}
+
+	rb = ring_buffer__new(bpf_map__fd(skel->maps.rb), handle_event, NULL,
+			      NULL);
+	if (!rb) {
+		ret = -1;
+		fprintf(stderr, "Failed to create ring buffer\n");
+		goto out;
+	}
+
 	path = argv[optind];
 	fs_fd = open(path, O_RDONLY);
 	if (fs_fd < 0) {
 		fprintf(stderr, "Couldn't open %s: %d (%s)\n", argv[optind],
 			errno, strerror(errno));
-		return 1;
+		ret = -11;
+		goto out;
 	}
-
-	ret = get_fs_size();
-	if (ret)
-		goto out;
-
-	ret = get_btrfs_usage(&usage);
-	if (ret)
-		goto out;
 
 	total_threads = data_threads + oappend_threads + falloc_threads +
 		meta_threads + falloc_fill_threads + odirect_threads;
@@ -932,14 +896,14 @@ int main(int argc, char **argv)
 	threads = calloc(total_threads, sizeof(pthread_t));
 	if (!threads) {
 		fprintf(stderr, "Couldn't allocate threads array\n");
-		goto out;
+		goto out_fd;
 	}
 
 	thread_nr = calloc(total_threads, sizeof(int));
 	if (!thread_nr) {
 		fprintf(stderr, "Couldn't allocate thread nr array\n");
 		free(threads);
-		goto out;
+		goto out_fd;
 	}
 
 	ret = posix_memalign((void **)&buf, 4096, buf_size);
@@ -947,7 +911,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Couldn't allocate the fill buffer\n");
 		free(thread_nr);
 		free(threads);
-		goto out;
+		goto out_fd;
 	}
 
 	ret = fill_buf();
@@ -968,8 +932,9 @@ int main(int argc, char **argv)
 	while (filling_threads)
 		pthread_cond_wait(&fill_cond, &mutex);
 
-	ret = check_early_enospc();
-	if (ret) {
+	ret = ring_buffer__poll(rb, 100);
+	if (ret < 0 || enospc_errors) {
+		printf("ret is %d enospc_errors is %d\n", ret, enospc_errors);
 		pthread_mutex_unlock(&mutex);
 		kill_threads(threads, total_threads);
 		goto out_threads;
@@ -998,7 +963,11 @@ out_free:
 	free(buf);
 	free(threads);
 	free(thread_nr);
-out:
+out_fd:
 	close(fs_fd);
+out:
+	ring_buffer__free(rb);
+	enospc_stress_bpf__destroy(skel);
+
 	return ret ? 1 : 0;
 }
