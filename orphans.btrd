@@ -1,0 +1,51 @@
+filesystem "/";
+
+k = key(0, BTRFS_ROOT_ITEM_KEY, 0, 0);
+roots = search(BTRFS_ROOT_TREE_OBJECTID, k);
+
+for r in roots {
+	rkey = keyof(r);
+	if rkey.type != BTRFS_ROOT_ITEM_KEY {
+		continue;
+	}
+	if rkey.objectid !=5 && (rkey.objectid < BTRFS_FIRST_FREE_OBJECTID || rkey.objectid > BTRFS_LAST_FREE_OBJECTID) {
+		continue;
+	}
+
+	total = 0;
+
+	k = key(BTRFS_ORPHAN_OBJECTID, BTRFS_ORPHAN_ITEM_KEY, 0, 0);
+	k.max_type = BTRFS_ORPHAN_ITEM_KEY;
+	orphans = search(rkey.objectid, k);
+
+	for o in orphans {
+		okey = keyof(o);
+
+		if okey.type != BTRFS_ORPHAN_ITEM_KEY {
+			continue;
+		}
+
+		k2 = key(okey.offset, BTRFS_INODE_ITEM_KEY, 0, 0);
+		k2.max_objectid = okey.offset;
+		k2.max_type = BTRFS_INODE_ITEM_KEY;
+	
+		inodes = search(257, k2);
+		for i in inodes {
+			ikey = keyof(i);
+			if ikey.objectid != okey.offset {
+				break;
+			}
+
+			if (ikey.type != BTRFS_INODE_ITEM_KEY) {
+				break;
+			}
+
+			total += i.nbytes;
+			break;
+		}
+	}
+
+	if total > 0 {
+		print "root " + str(rkey.objectid) + " bytes " + str(total);
+	}
+}
