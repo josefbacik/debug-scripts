@@ -1,6 +1,6 @@
 #!/bin/bash
 
-dmesg | egrep -q -e "kernel BUG at" \
+dmesg | grep -E -q -e "kernel BUG at" \
 	     -e "WARNING:" \
 	     -e "\bBUG:" \
 	     -e "Oops:" \
@@ -13,7 +13,7 @@ dmesg | egrep -q -e "kernel BUG at" \
 	     -e "UBSAN:" \
              -e "leaked"
 
-[ "$?" -eq 0 ] && ~/push.sh "got something" && exit 1
+[ "$?" -eq 0 ] &&  exit 1
 
 umount /mnt/test
 btrfs device scan --forget

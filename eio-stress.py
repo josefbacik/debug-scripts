@@ -20,7 +20,7 @@ int override_function(struct pt_regs *ctx, struct bio *bio)
 {
     unsigned long rc = RCVAL;
 
-    if (bio->bi_disk->major != MAJOR || bio->bi_disk->first_minor != MINOR)
+    if (bio->bi_bdev->bd_disk->major != MAJOR || bio->bi_bdev->bd_disk->first_minor != MINOR)
         return 0;
 
     /* Make sure we're ready to inject errors. */
